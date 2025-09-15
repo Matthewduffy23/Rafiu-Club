@@ -1,77 +1,145 @@
-import streamlit as st
-import pandas as pd
+import re
+from pathlib import Path
 
-st.set_page_config(page_title="Similar Players / Club Fit", page_icon="⚽", layout="wide")
+import pandas as pd
+import streamlit as st
+
+st.set_page_config(page_title="Scouting – Club Fit Finder", page_icon="⚽", layout="wide")
+DATA_FILE = "club_profiles.csv"
+
+# ----- helpers -----
+def _to_num(s):
+    if pd.isna(s): return pd.NA
+    if not isinstance(s, str): return s
+    s = re.sub(r"[€$,%\s]", "", s).replace(",", "")
+    return pd.to_numeric(s, errors="coerce")
 
 @st.cache_data
-def load_data():
-    """
-    Tries to load a prepared CSV with club fit outputs.
-    Put a file named 'club_profiles.csv' in the repo root for full results.
-    Fallback: a tiny demo dataframe so the app still runs.
-    """
-    try:
-        df = pd.read_csv("club_profiles.csv")
-        # normalize column names a bit if needed
-        df.columns = [c.strip() for c in df.columns]
-        return df
-    except Exception:
-        # --- Fallback demo so the app runs before you export real results
-        df = pd.DataFrame({
-            "Team": ["Borussia Dortmund", "RB Leipzig", "AC Milan", "Brighton"],
-            "League": ["Bundesliga", "Bundesliga", "Serie A", "Premier League"],
-            "League Strength": [88, 85, 83, 86],
-            "Market value": [62, 58, 65, 55],
-            "Club Fit %": [92, 90, 88, 86],
-            "Value Fit %": [92, 89, 87, 85],
-            "Final Fit %": [92, 90, 88, 86],
-        })
-        return df
+def load(path: str):
+    if not Path(path).exists():
+        st.error(f"CSV not found: {path}")
+        st.stop()
+    # keep strings for display to preserve your formatting & column order
+    raw = pd.read_csv(path, dtype=str, keep_default_na=False)
+    raw.columns = [c.strip() for c in raw.columns]
+    cols = raw.columns.tolist()
 
-df = load_data()
+    # numeric shadow copy for filters/sorts
+    num = raw.copy()
+    for c in ["Age", "Market value", "League Strength", "Final Fit %", "Club Fit %", "Value Fit %"]:
+        if c in num.columns:
+            num[c + "__num"] = num[c].map(_to_num)
 
-st.title("Similar Players / Club Fit Finder")
-st.caption("Type a name and adjust filters to see best club fits. Replace the demo data by adding 'club_profiles.csv' to this repo.")
+    return raw, num, cols
 
-# ---- Controls
-left, right = st.columns([2, 1])
-with left:
-    player_name = st.text_input("Player name", value="Rafiu Durosinmi").strip()
-with right:
-    topk = st.number_input("How many results?", min_value=3, max_value=50, value=10, step=1)
+raw, num, original_cols = load(DATA_FILE)
 
-# Optional filters if your CSV has these columns
-f1, f2, f3 = st.columns(3)
-with f1:
-    leagues = sorted(df["League"].dropna().unique()) if "League" in df.columns else []
-    chosen_leagues = st.multiselect("League filter", leagues, default=leagues[:3] if leagues else [])
-with f2:
-    min_fit = st.slider("Min Final Fit %", 0, 100, 70)
-with f3:
-    sort_by = st.selectbox("Sort by", [c for c in df.columns if c.endswith("%")] or df.columns, index= ( [c.endswith("%") for c in df.columns].index(True) if any(c.endswith("%") for c in df.columns) else 0))
-    ascending = st.checkbox("Ascending sort", value=False)
+st.title("Scouting – Club Fit Finder")
+st.caption("Filter by section/position, age, league strength, and market value. Table keeps your CSV’s exact column order & formatting.")
 
-# ---- Filtering
-df_show = df.copy()
-if chosen_leagues and "League" in df_show.columns:
-    df_show = df_show[df_show["League"].isin(chosen_leagues)]
-if "Final Fit %" in df_show.columns:
-    df_show = df_show[df_show["Final Fit %"] >= min_fit]
+# ============== controls ==============
+top = st.columns([2, 1, 1])
+with top[0]:
+    query = st.text_input("Search (Team / League / Position)", value="").strip()
+with top[1]:
+    topk = st.number_input("Rows to show", min_value=5, max_value=500, value=25, step=5)
+with top[2]:
+    show_dl = st.checkbox("Enable CSV download", value=True)
 
-# You can optionally personalize results by name (e.g., position/age filters) — for now we just display.
-df_show = df_show.sort_values(sort_by, ascending=ascending).head(int(topk))
+row1 = st.columns([1, 2])
+with row1[0]:
+    # Section comes from your CSV ("Section": CBs/FBs/CMs/ATTs/CF)
+    sections = sorted(raw["Section"].unique()) if "Section" in raw.columns else []
+    section = st.selectbox("Section", options=sections, index=0 if sections else None)
 
-st.subheader(f"Top Matches for: {player_name if player_name else '—'}")
-st.dataframe(df_show, use_container_width=True)
+with row1[1]:
+    # Positions available (within selected section)
+    if "Position" in raw.columns:
+        if section:
+            pos_options = sorted(raw.loc[raw["Section"] == section, "Position"].unique())
+        else:
+            pos_options = sorted(raw["Position"].unique())
+        pos_sel = st.multiselect("Positions", options=pos_options, default=pos_options)
+    else:
+        pos_sel = []
 
-with st.expander("How to plug in your real outputs"):
+row2 = st.columns(4)
+with row2[0]:
+    # Age
+    if "Age__num" in num.columns and num["Age__num"].notna().any():
+        a_min = int(num["Age__num"].min(skipna=True)); a_max = int(num["Age__num"].max(skipna=True))
+        age_rng = st.slider("Age", a_min, a_max, (a_min, a_max))
+    else:
+        age_rng = None
+
+with row2[1]:
+    # League Strength
+    if "League Strength__num" in num.columns and num["League Strength__num"].notna().any():
+        q_min = float(num["League Strength__num"].min(skipna=True)); q_max = float(num["League Strength__num"].max(skipna=True))
+        lq_rng = st.slider("League Strength", float(q_min), float(q_max), (float(q_min), float(q_max)))
+    else:
+        lq_rng = None
+
+with row2[2]:
+    # Market value
+    if "Market value__num" in num.columns and num["Market value__num"].notna().any():
+        v_min = float(num["Market value__num"].min(skipna=True)); v_max = float(num["Market value__num"].max(skipna=True))
+        val_rng = st.slider("Market value (same units as CSV)", float(max(0, v_min)), float(max(v_max, v_min+1)), (float(max(0, v_min)), float(v_max)))
+    else:
+        val_rng = None
+
+with row2[3]:
+    # Sort
+    default_sort = "Final Fit %" if "Final Fit %" in original_cols else original_cols[0]
+    sort_col = st.selectbox("Sort by", original_cols, index=original_cols.index(default_sort))
+    asc = st.checkbox("Ascending", value=False)
+
+# ============== filtering (on numeric copy) ==============
+idx = pd.Series(True, index=raw.index)
+
+if "Section" in raw.columns and section:
+    idx &= raw["Section"] == section
+
+if pos_sel and "Position" in raw.columns:
+    idx &= raw["Position"].isin(pos_sel)
+
+if query:
+    mask = pd.Series(False, index=raw.index)
+    for c in ["Team", "League", "Position"]:
+        if c in raw.columns:
+            mask |= raw[c].astype(str).str.contains(query, case=False, na=False)
+    idx &= mask
+
+if age_rng and "Age__num" in num.columns:
+    idx &= (num["Age__num"] >= age_rng[0]) & (num["Age__num"] <= age_rng[1])
+
+if lq_rng and "League Strength__num" in num.columns:
+    idx &= (num["League Strength__num"] >= lq_rng[0]) & (num["League Strength__num"] <= lq_rng[1])
+
+if val_rng and "Market value__num" in num.columns:
+    idx &= (num["Market value__num"] >= val_rng[0]) & (num["Market value__num"] <= val_rng[1])
+
+# exact-display dataframe (strings) in original order
+view = raw.loc[idx, original_cols].copy()
+
+# sort respecting numeric meaning when possible
+if sort_col in view.columns:
+    tmp = view[sort_col].map(_to_num)
+    if pd.notna(tmp).mean() > 0.5:
+        view = view.assign(_S=tmp).sort_values("_S", ascending=asc, kind="mergesort").drop(columns="_S")
+    else:
+        view = view.sort_values(sort_col, ascending=asc, kind="mergesort")
+
+st.markdown(f"**Results:** {len(view):,} rows (showing first {min(len(view), int(topk)):,})")
+st.dataframe(view.head(int(topk)), use_container_width=True)
+
+if show_dl and len(view):
+    st.download_button("⬇️ Download filtered CSV", data=view.to_csv(index=False).encode("utf-8"),
+                       file_name="filtered_results.csv", mime="text/csv")
+
+with st.expander("Notes"):
     st.markdown(
-        """
-        1. In your notebook, **export the final table** (the one with fit scores) to CSV:
-           ```python
-           club_profiles.to_csv("club_profiles.csv", index=False)
-           ```
-        2. Upload **club_profiles.csv** to the repo root on GitHub.
-        3. Redeploy or refresh the app — it will automatically load your real data.
-        """
+        "- This app preserves your CSV’s formatting (€, % etc.) while filtering on a numeric copy.\n"
+        "- To change how scores are computed, update your notebook and re-export `club_profiles.csv`.\n"
+        "- Columns used here: Section, Team, Position, League, Age, Market value, League Strength, Final Fit %, Club Fit %, Value Fit %."
     )
