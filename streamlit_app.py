@@ -5,18 +5,12 @@ import streamlit as st
 
 st.set_page_config(page_title="Club Fit – Finder", page_icon="⚽", layout="wide")
 
-# We'll automatically use the first CSV we find from this list:
-FILE_CANDIDATES = ["all_results.csv", "cf_results.csv", "results.csv", "club_profiles.csv"]
-DATA_FILE = next((f for f in FILE_CANDIDATES if Path(f).exists()), None)
-if DATA_FILE is None:
-    st.error("No data file found. Upload one of: all_results.csv / cf_results.csv / results.csv / club_profiles.csv")
-    st.stop()
-
-ID_COL = "Player"  # the column we filter by name
+DATA_FILE = "results.csv"   # <-- your uploaded file
+ID_COL = "Player"           # typed name filters this column
 DISPLAY_COLS = [
     "Team","Position","League","Age","Market value",
     "League Strength","Final Fit %","Club Fit %","Value Fit %"
-]  # change if you want a different set/order
+]
 
 def _to_num(s):
     if pd.isna(s): return pd.NA
@@ -26,10 +20,13 @@ def _to_num(s):
 
 @st.cache_data
 def load_data(path: str):
+    if not Path(path).exists():
+        st.error(f"CSV not found: {path}")
+        st.stop()
     raw = pd.read_csv(path, dtype=str, keep_default_na=False)
     raw.columns = [c.strip() for c in raw.columns]
 
-    # ensure required columns exist (blank if missing)
+    # make sure the columns we show exist (blank if missing)
     for c in [ID_COL] + DISPLAY_COLS:
         if c not in raw.columns:
             raw[c] = ""
@@ -40,19 +37,16 @@ def load_data(path: str):
         if c in num.columns:
             num[c+"__num"] = num[c].map(_to_num)
 
-    # we’ll display only these columns (plus Player first)
+    # only show the columns we want (Player first)
     show_cols = [ID_COL] + [c for c in DISPLAY_COLS if c in raw.columns]
-    raw = raw[show_cols]
-    num  = num.reindex(columns=[(c+"__num") for c in DISPLAY_COLS if c in raw.columns], fill_value=pd.NA)
-
-    return raw, num
+    return raw[show_cols], num
 
 raw, num = load_data(DATA_FILE)
 
 st.title("Club Fit – Finder")
-st.caption("Type a player name. Adjust League Strength & Age. Table keeps your CSV’s columns/order.")
+st.caption("Type a player’s name. Adjust League Strength & Age. The table shows only your chosen columns in the same order.")
 
-# ---------- controls ----------
+# Controls
 c1, c2, c3 = st.columns([2,1,1])
 with c1:
     player = st.text_input("Player name", value="").strip()
@@ -75,7 +69,7 @@ with f2:
     else:
         age = None
 
-# sorting
+# Sorting
 sort_cols = [c for c in DISPLAY_COLS if c in raw.columns]
 default_sort = "Final Fit %" if "Final Fit %" in sort_cols else sort_cols[0]
 s1, s2 = st.columns([3,1])
@@ -84,14 +78,11 @@ with s1:
 with s2:
     asc = st.checkbox("Ascending", False)
 
-# ---------- filtering ----------
+# Filtering
 view = raw.copy()
-
-# filter by player (contains match; if empty, show all)
 if player:
     view = view[view[ID_COL].astype(str).str.contains(player, case=False, na=False)]
 
-# numeric filters use the numeric shadow on the same row index
 idx = view.index
 if lq is not None and "League Strength__num" in num.columns:
     n = num.loc[idx, "League Strength__num"]
@@ -101,7 +92,7 @@ if age is not None and "Age__num" in num.columns:
     idx = idx[(n >= age[0]) & (n <= age[1])]
 view = view.loc[idx]
 
-# numeric-aware sort
+# Numeric-aware sort
 tmp = view[sort_by].map(_to_num) if sort_by in view.columns else None
 if tmp is not None and pd.notna(tmp).mean() > 0.5:
     view = view.assign(_S=tmp).sort_values("_S", ascending=asc, kind="mergesort").drop(columns="_S")
@@ -118,5 +109,3 @@ if enable_dl and len(view):
         file_name=f"{(player or 'results').replace(' ','_')}.csv",
         mime="text/csv",
     )
-
-            
